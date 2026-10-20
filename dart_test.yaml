@@ -1,4 +1,4 @@
 tags:
   integration:
-    
+    # Requires a broker on localhost:1883, see tool/mosquitto/mosquitto.conf.
     timeout: 2x
