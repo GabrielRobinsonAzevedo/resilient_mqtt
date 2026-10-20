@@ -1,0 +1,17 @@
+# Dart / pub
+.dart_tool/
+.packages
+build/
+# Libraries should not commit the lockfile.
+pubspec.lock
+doc/api/
+
+# Coverage
+coverage/
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+*.swp
+.DS_Store
