@@ -1,3 +1,8 @@
+/// MQTT topic filter matching (MQTT 3.1.1, section 4.7).
+///
+/// Supports the single-level (`+`) and multi-level (`#`) wildcards. Topics
+/// starting with `$` (e.g. `$SYS/...`) are not matched by filters starting
+/// with a wildcard.
 bool topicMatches(String filter, String topic) {
   if (filter == topic) return true;
   if (topic.startsWith(r'$') &&
@@ -9,6 +14,7 @@ bool topicMatches(String filter, String topic) {
   for (var i = 0; i < f.length; i++) {
     final level = f[i];
     if (level == '#') {
+      // '#' must be last; it also matches the parent level ("a/#" ~ "a").
       return i == f.length - 1;
     }
     if (i >= t.length) return false;

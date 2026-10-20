@@ -2,7 +2,9 @@ import 'dart:io' show SecurityContext;
 
 import 'package:mqtt_client/mqtt_client.dart' show MqttQos;
 
+/// Last Will and Testament published by the broker if the client vanishes.
 final class MqttWill {
+  /// Creates a Last Will message.
   const MqttWill({
     required this.topic,
     required this.message,
@@ -10,16 +12,25 @@ final class MqttWill {
     this.retain = false,
   });
 
+  /// Topic the will is published to.
   final String topic;
 
+  /// UTF-8 payload of the will.
   final String message;
 
+  /// QoS of the will message.
   final MqttQos qos;
 
+  /// Whether the broker retains the will message.
   final bool retain;
 }
 
+/// Immutable connection settings for a `ResilientMqttClient`.
 final class MqttConfig {
+  /// Creates a configuration.
+  ///
+  /// [connectTimeout] bounds a single connection attempt (TCP + CONNACK);
+  /// the spacing between attempts is controlled by the `ReconnectPolicy`.
   const MqttConfig({
     required this.host,
     required this.clientId,
@@ -35,30 +46,44 @@ final class MqttConfig {
     this.logging = false,
   });
 
+  /// Broker host name or IP address.
   final String host;
 
+  /// Broker TCP port.
   final int port;
 
+  /// MQTT client identifier. Must be unique per broker.
   final String clientId;
 
+  /// Keep-alive interval (PINGREQ period). Rounded down to whole seconds.
   final Duration keepAlive;
 
+  /// Timeout for a single connection attempt.
   final Duration connectTimeout;
 
+  /// Whether to start a clean session (MQTT 3.1.1 `cleanSession` flag).
   final bool cleanSession;
 
+  /// Optional user name.
   final String? username;
 
+  /// Optional password.
   final String? password;
 
+  /// Whether to use TLS over TCP.
   final bool secure;
 
+  /// TLS settings when [secure] is `true`; defaults to
+  /// `SecurityContext.defaultContext`.
   final SecurityContext? securityContext;
 
+  /// Optional Last Will and Testament.
   final MqttWill? will;
 
+  /// Enables `mqtt_client` debug logging.
   final bool logging;
 
+  /// Returns a copy with the given fields replaced.
   MqttConfig copyWith({
     String? host,
     int? port,

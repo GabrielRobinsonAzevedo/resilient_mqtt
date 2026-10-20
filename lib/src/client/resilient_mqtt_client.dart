@@ -12,17 +12,48 @@ import '../errors.dart';
 import '../subscription/topic_matcher.dart';
 import 'mqtt_config.dart';
 
+/// Builds the underlying `mqtt_client` instance for one connection attempt.
+///
+/// A fresh client is created per attempt so that no state leaks between
+/// sessions. Override it to customise the client (socket options, websockets,
+/// `onBadCertificate`, ...) or to inject a fake in tests. The returned
+/// client is further configured by [ResilientMqttClient] (auto-reconnect is
+/// always disabled, keep-alive / timeouts / connect message come from
+/// [MqttConfig]).
 typedef MqttServerClientFactory = MqttServerClient Function(MqttConfig config);
 
+/// A message received on a subscription.
 typedef MqttMessageEvent = MqttReceivedMessage<MqttPublishMessage>;
 
+/// Convenience accessors for received messages.
 extension MqttMessageEventPayload on MqttReceivedMessage<MqttPublishMessage> {
+  /// The raw payload bytes (copied).
   Uint8List get bytes => Uint8List.fromList(payload.payload.message);
 
+  /// The payload decoded as UTF-8 (malformed sequences are replaced).
   String get text => utf8.decode(bytes, allowMalformed: true);
 }
 
+/// A resilience layer on top of `mqtt_client`'s [MqttServerClient].
+///
+/// * Reconnects with a pluggable [ReconnectPolicy] (exponential backoff with
+///   full jitter by default) instead of `mqtt_client`'s immediate retries.
+/// * Exposes the connection state as a [Stream] of [ConnectionState].
+/// * Keeps a registry of subscriptions and re-subscribes after every
+///   reconnection; subscriptions are plain Dart [Stream]s (optionally
+///   decoded with an [MqttDecoder]).
+///
+/// ```dart
+/// final client = ResilientMqttClient(
+///   config: const MqttConfig(host: 'localhost', clientId: 'demo'),
+/// );
+/// client.connectionState.listen(print);
+/// await client.connect();
+/// client.subscribeDecoded('sensors/+/temp', const StringMqttDecoder())
+///     .listen(print);
+/// ```
 class ResilientMqttClient {
+  /// Creates a client. Nothing happens on the network until [connect].
   ResilientMqttClient({
     required this.config,
     ReconnectPolicy? reconnectPolicy,
@@ -30,6 +61,9 @@ class ResilientMqttClient {
   })  : reconnectPolicy = reconnectPolicy ?? ExponentialBackoff(),
         _clientFactory = clientFactory ?? defaultClientFactory;
 
+  /// The default [MqttServerClientFactory]: a TCP [MqttServerClient] that
+  /// makes a single attempt per `connect()` (retries are driven by the
+  /// [ReconnectPolicy]).
   static MqttServerClient defaultClientFactory(MqttConfig config) =>
       MqttServerClient.withPort(
         config.host,
@@ -38,8 +72,10 @@ class ResilientMqttClient {
         maxConnectionAttempts: 1,
       );
 
+  /// Connection settings.
   final MqttConfig config;
 
+  /// Policy that spaces reconnection attempts.
   final ReconnectPolicy reconnectPolicy;
 
   final MqttServerClientFactory _clientFactory;
@@ -52,7 +88,8 @@ class ResilientMqttClient {
 
   ConnectionState _state = const Disconnected();
   MqttServerClient? _client;
-
+  // Cancelled in _detach().
+  // ignore: cancel_subscriptions
   StreamSubscription<List<MqttReceivedMessage<MqttMessage>>>? _updatesSub;
   Timer? _retryTimer;
   Future<bool>? _inFlight;
@@ -61,10 +98,14 @@ class ResilientMqttClient {
   bool _wantConnected = false;
   bool _disposed = false;
 
+  /// The current connection state.
   ConnectionState get currentState => _state;
 
+  /// Whether the client is currently connected.
   bool get isConnected => _state is Connected;
 
+  /// Connection state changes. Each listener first receives the current
+  /// state, then every subsequent change.
   Stream<ConnectionState> get connectionState => Stream.multi(
         (controller) {
           controller.add(_state);
@@ -81,8 +122,16 @@ class ResilientMqttClient {
         isBroadcast: true,
       );
 
+  /// Payloads that a decoder passed to [subscribeDecoded] failed to decode.
   Stream<DecodeError> get decodeErrors => _decodeErrors.stream;
 
+  /// Starts connecting and keeps the connection alive until [disconnect] or
+  /// [dispose].
+  ///
+  /// Completes with `true` if the first attempt succeeded. On failure it
+  /// completes with `false` (it does not throw on network errors) and keeps
+  /// retrying in the background according to [reconnectPolicy]; observe
+  /// [connectionState] or await [waitUntilConnected].
   Future<bool> connect() {
     _checkNotDisposed();
     if (_state is Connected) return Future.value(true);
@@ -93,6 +142,7 @@ class ResilientMqttClient {
       return inFlight;
     }
     if (_retryTimer != null) {
+      // A retry is already scheduled: run it now.
       _retryTimer!.cancel();
       _retryTimer = null;
       return _runAttempt();
@@ -102,6 +152,10 @@ class ResilientMqttClient {
     return _runAttempt();
   }
 
+  /// Completes when the client is [Connected].
+  ///
+  /// Completes with a [MqttNotConnectedException] if the policy gives up
+  /// first, or a [TimeoutException] after [timeout].
   Future<void> waitUntilConnected({Duration? timeout}) async {
     final future = connectionState.firstWhere(
       (s) =>
@@ -116,6 +170,9 @@ class ResilientMqttClient {
     }
   }
 
+  /// Hint that the network is (probably) back, e.g. from a connectivity
+  /// listener in a Flutter app. Skips the pending backoff delay and retries
+  /// immediately. No-op unless a retry is scheduled.
   void notifyNetworkAvailable() {
     if (_disposed || !_wantConnected || _retryTimer == null) return;
     _retryTimer!.cancel();
@@ -123,6 +180,8 @@ class ResilientMqttClient {
     unawaited(_runAttempt());
   }
 
+  /// Disconnects and stops reconnecting. Subscriptions stay registered and
+  /// are restored by the next [connect].
   Future<void> disconnect() async {
     _wantConnected = false;
     _retryTimer?.cancel();
@@ -135,6 +194,8 @@ class ResilientMqttClient {
     }
   }
 
+  /// Disconnects and releases all resources. Every subscription stream and
+  /// [connectionState] stream is closed. The client cannot be reused.
   Future<void> dispose() async {
     if (_disposed) return;
     await disconnect();
@@ -150,6 +211,9 @@ class ResilientMqttClient {
     ]);
   }
 
+  /// Publishes [payload] to [topic] and returns the message identifier.
+  ///
+  /// Throws [MqttNotConnectedException] while offline.
   int publish(
     String topic,
     List<int> payload, {
@@ -157,7 +221,9 @@ class ResilientMqttClient {
     bool retain = false,
   }) {
     _checkNotDisposed();
-
+    // TODO(v0.2): enqueue into an OfflineQueue while offline (overflow
+    // strategy + TTL) instead of throwing, flush it in order on reconnect,
+    // and return a Future<PublishResult> completed on PUBACK/PUBCOMP.
     final client = _client;
     if (client == null || _state is! Connected) {
       throw const MqttNotConnectedException('Cannot publish while offline');
@@ -176,6 +242,7 @@ class ResilientMqttClient {
     }
   }
 
+  /// Publishes [text] encoded as UTF-8. See [publish].
   int publishString(
     String topic,
     String text, {
@@ -184,6 +251,13 @@ class ResilientMqttClient {
   }) =>
       publish(topic, utf8.encode(text), qos: qos, retain: retain);
 
+  /// Subscribes to [topicFilter] (wildcards `+` and `#` allowed).
+  ///
+  /// The returned broadcast stream subscribes on the broker when it gets its
+  /// first listener and unsubscribes when the last listener cancels. The
+  /// subscription survives reconnections. Calling [subscribe] again with the
+  /// same filter returns the same stream; a higher [qos] is applied from the
+  /// next (re)connection.
   Stream<MqttMessageEvent> subscribe(
     String topicFilter, {
     MqttQos qos = MqttQos.atMostOnce,
@@ -211,6 +285,10 @@ class ResilientMqttClient {
     return sub.controller.stream;
   }
 
+  /// Like [subscribe], but decodes every payload with [decoder].
+  ///
+  /// Payloads the decoder throws on are skipped and reported on
+  /// [decodeErrors]; the stream itself never errors because of them.
   Stream<T> subscribeDecoded<T>(
     String topicFilter,
     MqttDecoder<T> decoder, {
@@ -237,6 +315,10 @@ class ResilientMqttClient {
           },
         ),
       );
+
+  // ---------------------------------------------------------------------
+  // Connection handling
+  // ---------------------------------------------------------------------
 
   Future<bool> _runAttempt() {
     final future = _attemptOnce().then((ok) {
@@ -276,6 +358,8 @@ class ResilientMqttClient {
     final client = _clientFactory(config)
       ..autoReconnect = false
       ..keepAlivePeriod = config.keepAlive.inSeconds
+      // Without a ping-response timeout a half-open TCP connection is never
+      // detected; one keep-alive period is a reasonable default.
       ..disconnectOnNoResponsePeriod = config.keepAlive.inSeconds
       ..connectTimeoutPeriod = config.connectTimeout.inMilliseconds
       ..connectionTimeout = config.connectTimeout.inMilliseconds
@@ -306,15 +390,17 @@ class ResilientMqttClient {
     _lastError = null;
     reconnectPolicy.reset();
     _updatesSub = client.updates?.listen(_dispatch);
-
+    // Re-subscribe everything that has listeners. With cleanSession=false
+    // the broker may already hold these; re-subscribing is idempotent.
     for (final sub in _subscriptions.values) {
       if (sub.active) _brokerSubscribe(client, sub);
     }
-
+    // TODO(v0.2): flush the offline queue here, in order, rate limited.
     _setState(const Connected());
   }
 
   void _onClientDisconnected(MqttServerClient client) {
+    // Ignore callbacks from stale clients and from our own disconnect().
     if (!identical(client, _client)) return;
     unawaited(_detach());
     if (_wantConnected && !_disposed) {
@@ -362,8 +448,14 @@ class ResilientMqttClient {
     client.onDisconnected = null;
     try {
       client.disconnect();
-    } catch (_) {}
+    } catch (_) {
+      // Already closed / never connected.
+    }
   }
+
+  // ---------------------------------------------------------------------
+  // Subscriptions
+  // ---------------------------------------------------------------------
 
   void _activate(_Subscription sub) {
     sub.active = true;
@@ -377,7 +469,9 @@ class ResilientMqttClient {
     if (client == null) return;
     try {
       client.unsubscribe(sub.filter);
-    } catch (_) {}
+    } catch (_) {
+      // Connection dropped meanwhile; nothing to undo on the broker.
+    }
   }
 
   void _brokerSubscribe(MqttServerClient client, _Subscription sub) {
@@ -393,7 +487,8 @@ class ResilientMqttClient {
       final message = received.payload;
       if (message is! MqttPublishMessage) continue;
       final event = MqttMessageEvent(received.topic, message);
-
+      // TODO(v0.2): with overlapping filters some brokers deliver a message
+      // once per matching subscription; dedupe by packet id here.
       for (final sub in _subscriptions.values) {
         if (sub.active && topicMatches(sub.filter, received.topic)) {
           sub.controller.add(event);

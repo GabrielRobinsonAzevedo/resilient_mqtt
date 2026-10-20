@@ -110,6 +110,7 @@ void main() {
     test('gives up with retriesExhausted when the broker is unreachable',
         () async {
       final client = ResilientMqttClient(
+        // Port 1 on localhost: connection refused immediately.
         config: const MqttConfig(
           host: '127.0.0.1',
           port: 1,

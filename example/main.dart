@@ -1,3 +1,10 @@
+// Minimal CLI demo.
+//
+//   docker run --rm -p 1883:1883 \
+//     -v "$PWD/tool/mosquitto:/mosquitto/config" eclipse-mosquitto:2
+//   dart run example/main.dart [host] [port]
+//
+// Then stop/start the broker and watch the client back off and recover.
 import 'dart:async';
 import 'dart:io';
 
@@ -35,11 +42,12 @@ Future<void> main(List<String> args) async {
       .listen((text) => stdout.writeln('← $text'));
   client.decodeErrors.listen((e) => stderr.writeln('decode error: $e'));
 
+  // Does not throw if the broker is down: it keeps retrying in background.
   await client.connect();
 
   var counter = 0;
   final timer = Timer.periodic(const Duration(seconds: 2), (_) {
-    if (!client.isConnected) return;
+    if (!client.isConnected) return; // v0.2 will queue instead.
     client.publishString('resilient_mqtt/demo/tick', 'tick ${++counter}');
   });
 

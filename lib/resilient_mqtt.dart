@@ -1,3 +1,6 @@
+/// A resilience layer for `mqtt_client`: exponential backoff with full
+/// jitter, connection state as a `Stream`, automatic re-subscribe and typed
+/// decoders. Pure Dart.
 library;
 
 export 'package:mqtt_client/mqtt_client.dart'

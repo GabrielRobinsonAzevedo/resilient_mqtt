@@ -3,6 +3,7 @@ import 'dart:math';
 import 'package:resilient_mqtt/resilient_mqtt.dart';
 import 'package:test/test.dart';
 
+/// A [Random] that always returns the same [nextDouble] value.
 class _FixedRandom implements Random {
   _FixedRandom(this.value);
 

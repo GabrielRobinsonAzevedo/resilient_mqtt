@@ -7,6 +7,15 @@ import 'dart:io';
 import 'package:resilient_mqtt/resilient_mqtt.dart';
 import 'package:test/test.dart';
 
+/// Integration tests against a real broker (Mosquitto in CI).
+///
+/// Environment:
+/// * `MQTT_HOST` / `MQTT_PORT` (default `localhost:1883`).
+/// * `MQTT_BROKER_STOP_CMD` / `MQTT_BROKER_START_CMD`: shell commands that
+///   stop/start the broker (default: `docker stop|start mosquitto`). Set
+///   `MQTT_SKIP_RESTART=1` to skip the broker-restart scenario.
+///
+/// Run with: `dart test -t integration --concurrency=1`.
 final _env = Platform.environment;
 final _host = _env['MQTT_HOST'] ?? 'localhost';
 final _port = int.parse(_env['MQTT_PORT'] ?? '1883');
@@ -49,7 +58,7 @@ void main() {
 
     final received =
         client.subscribeDecoded('$topic/#', const StringMqttDecoder()).first;
-
+    // Give the broker a moment to process SUBSCRIBE.
     await Future<void>.delayed(const Duration(milliseconds: 300));
     client.publishString('$topic/a', 'hello', qos: MqttQos.atLeastOnce);
 
